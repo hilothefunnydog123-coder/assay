@@ -61,7 +61,9 @@ Pass one or many; a case passes when all of them do.
 | `exact_match` | output equals `expect` |
 | `contains(s)` / `not_contains(s)` | substring present / absent (great for banned words, PII, prompt leaks) |
 | `regex(p)` | pattern matches |
-| `is_json` / `json_has_keys(...)` | output is valid JSON with the right shape |
+| `is_json` / `json_has_keys(...)` | output is valid JSON with the right keys |
+| `matches_schema(schema)` | output matches a nested type schema (fields, lists, types) |
+| `similarity(threshold, embed=None)` | output is close enough — lexical, or semantic with your embedder |
 | `length_between(lo, hi)` | output length is sane |
 | `llm_judge(rubric, judge)` | a model grades open-ended output against a rubric |
 
@@ -81,12 +83,24 @@ Writing your own scorer is just a function `(output, case) -> Score`. There is n
 
 Green build = the model layer still does what it did yesterday. Red build = something changed, and the diff tells you exactly what.
 
+## Dashboard
+
+```bash
+assay serve      # opens a local dashboard at http://127.0.0.1:8787
+```
+
+A dark, zero-dependency web UI over your `.assay/` history: pass rate over time,
+a banner listing exactly what regressed, and a drill-down of every case (input,
+output, expected, per-scorer reasons). It refreshes as new runs land, so you can
+watch a prompt change land in real time. Nothing leaves your machine.
+
 ## Commands
 
 ```bash
-assay run evals/            # run evals, save results, auto-diff vs last run
+assay run evals/              # run evals, save results, auto-diff vs last run
 assay compare support-router  # diff the last two runs
 assay history support-router  # pass rate over time
+assay serve                   # web dashboard on localhost
 ```
 
 ## Why it's built this way

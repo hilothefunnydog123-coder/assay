@@ -37,6 +37,35 @@ def test_structure_scorers():
     print("ok  is_json / json_has_keys / length_between")
 
 
+def test_similarity():
+    from assay.core import Case
+    c = Case(input=None, expect="the quick brown fox")
+    assert S.similarity(0.9)("the quick brown fox", c).passed          # identical
+    assert S.similarity(0.7)("the quick brown fax", c).passed          # close
+    assert not S.similarity(0.9)("something else entirely", c).passed  # far
+    # pluggable semantic mode via a fake embedder
+    embed = {"cat": [1, 0], "kitten": [0.9, 0.1], "car": [0, 1]}
+    c2 = Case(input=None, expect="cat")
+    assert S.similarity(0.9, embed=lambda t: embed.get(t, [0, 0]))("kitten", c2).passed
+    assert not S.similarity(0.9, embed=lambda t: embed.get(t, [0, 0]))("car", c2).passed
+    print("ok  similarity (lexical + pluggable semantic)")
+
+
+def test_matches_schema():
+    from assay.core import Case
+    c = Case(input=None)
+    schema = {"intent": str, "confidence": "number", "tags": [str], "meta": {"lang": str}}
+    good = {"intent": "billing", "confidence": 0.9, "tags": ["a", "b"], "meta": {"lang": "en"}}
+    assert S.matches_schema(schema)(good, c).passed
+    assert S.matches_schema(schema)(json.dumps(good), c).passed        # from JSON string
+    assert not S.matches_schema(schema)({"intent": "x"}, c).passed     # missing fields
+    bad_type = {"intent": "x", "confidence": "high", "tags": ["a"], "meta": {"lang": "en"}}
+    r = S.matches_schema(schema)(bad_type, c)
+    assert not r.passed and "confidence" in r.reason
+    assert not S.matches_schema(schema)({"intent": 1, "confidence": 1, "tags": [1], "meta": {"lang": "en"}}, c).passed
+    print("ok  matches_schema (nested, lists, types)")
+
+
 def test_llm_judge_pluggable():
     from assay.core import Case
     # a fake judge that always scores 0.9 — proves the wiring without an API key

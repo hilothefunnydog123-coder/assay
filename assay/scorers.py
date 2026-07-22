@@ -7,7 +7,9 @@ with the same signature — there is nothing special about these.
 """
 from __future__ import annotations
 
+import difflib
 import json
+import math
 import re
 from typing import Any, Callable
 
@@ -95,6 +97,99 @@ def length_between(lo: int, hi: int) -> Callable[[Any, Case], Score]:
         return Score("length_between", ok, 1.0 if ok else 0.0,
                      "" if ok else f"length {n} not in [{lo}, {hi}]")
     return scorer
+
+
+# --- similarity ----------------------------------------------------------- #
+def similarity(threshold: float = 0.8,
+               embed: Callable[[str], list] | None = None) -> Callable[[Any, Case], Score]:
+    """Pass when the output is *similar enough* to ``case.expect`` — for outputs
+    that are correct without being character-identical.
+
+    Lexical by default (difflib ratio, 0..1, no dependencies). Pass an ``embed``
+    function (text -> vector) to score true *semantic* similarity by cosine — the
+    same pluggable pattern as ``llm_judge``, so Assay never bundles an embedder.
+    """
+    def scorer(output: Any, case: Case) -> Score:
+        a, b = _str(output), _str(case.expect)
+        if embed is not None:
+            sim = _cosine(embed(a), embed(b))
+            kind = "semantic"
+        else:
+            sim = difflib.SequenceMatcher(None, a, b).ratio()
+            kind = "lexical"
+        ok = sim >= threshold
+        return Score("similarity", ok, sim,
+                     "" if ok else f"{kind} similarity {sim:.2f} < {threshold}")
+    return scorer
+
+
+def _cosine(u: list, v: list) -> float:
+    if not u or not v or len(u) != len(v):
+        return 0.0
+    dot = sum(x * y for x, y in zip(u, v))
+    nu = math.sqrt(sum(x * x for x in u))
+    nv = math.sqrt(sum(y * y for y in v))
+    return dot / (nu * nv) if nu and nv else 0.0
+
+
+# --- schema --------------------------------------------------------------- #
+def matches_schema(schema: dict) -> Callable[[Any, Case], Score]:
+    """Validate structured output against a lightweight schema.
+
+    A schema maps field -> expected type: a Python type (``str``, ``int``,
+    ``float``, ``bool``, ``list``, ``dict``), the string ``"number"`` (int or
+    float), a nested schema ``dict`` for objects, or ``[item_type]`` for a list of
+    a given type. Every field is required.
+
+        matches_schema({"intent": str, "confidence": "number",
+                        "entities": [str], "meta": {"lang": str}})
+    """
+    def scorer(output: Any, case: Case) -> Score:
+        try:
+            obj = output if isinstance(output, (dict, list)) else json.loads(output)
+        except Exception as exc:
+            return Score("matches_schema", False, 0.0, f"not JSON: {exc}")
+        errors: list[str] = []
+        _check(obj, schema, "", errors)
+        ok = not errors
+        return Score("matches_schema", ok, 1.0 if ok else 0.0,
+                     "" if ok else "; ".join(errors[:4]))
+    return scorer
+
+
+def _type_ok(value: Any, spec: Any) -> bool:
+    if spec == "number":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if isinstance(spec, type):
+        if spec in (int, float) and isinstance(value, bool):
+            return False
+        return isinstance(value, spec)
+    return False
+
+
+def _check(obj: Any, spec: Any, path: str, errors: list) -> None:
+    if isinstance(spec, dict):
+        if not isinstance(obj, dict):
+            errors.append(f"{path or 'root'}: expected object")
+            return
+        for key, sub in spec.items():
+            p = f"{path}.{key}" if path else key
+            if key not in obj:
+                errors.append(f"{p}: missing")
+            else:
+                _check(obj[key], sub, p, errors)
+    elif isinstance(spec, list):
+        if not isinstance(obj, list):
+            errors.append(f"{path}: expected list")
+            return
+        item_spec = spec[0] if spec else None
+        for i, item in enumerate(obj):
+            if item_spec is not None:
+                _check(item, item_spec, f"{path}[{i}]", errors)
+    else:
+        if not _type_ok(obj, spec):
+            name = spec if isinstance(spec, str) else getattr(spec, "__name__", spec)
+            errors.append(f"{path or 'root'}: expected {name}, got {type(obj).__name__}")
 
 
 # --- model-graded --------------------------------------------------------- #

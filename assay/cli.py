@@ -71,6 +71,12 @@ def cmd_compare(args) -> int:
     return 1 if d.regressed else 0
 
 
+def cmd_serve(args) -> int:
+    from . import server
+    server.serve(port=args.port)
+    return 0
+
+
 def cmd_history(args) -> int:
     runs = store.history(args.eval)
     if not runs:
@@ -99,6 +105,10 @@ def main(argv=None) -> int:
     h = sub.add_parser("history", help="show pass rate over time for an eval")
     h.add_argument("eval")
     h.set_defaults(fn=cmd_history)
+
+    s = sub.add_parser("serve", help="open the web dashboard on localhost")
+    s.add_argument("-p", "--port", type=int, default=8787)
+    s.set_defaults(fn=cmd_serve)
 
     args = p.parse_args(argv)
     return args.fn(args)
