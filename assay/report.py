@@ -10,6 +10,28 @@ from .core import Run
 _COLOR = sys.stdout.isatty()
 
 
+def _unicode_ok() -> bool:
+    """Whether the stream can actually render the block glyphs.
+
+    A Windows console on cp1252 raises UnicodeEncodeError on `█`, which would
+    crash the run *after* it succeeded — the worst possible time. Ask the stream
+    rather than guessing from the platform.
+    """
+    enc = getattr(sys.stdout, "encoding", None) or ""
+    try:
+        "█░·→".encode(enc)
+        return True
+    except (LookupError, UnicodeEncodeError):
+        return False
+
+
+_UNICODE = _unicode_ok()
+_FULL, _EMPTY, _DOT = ("█", "░", "·") if _UNICODE else ("#", "-", "*")
+# Punctuation a cp1252 console technically encodes but some Windows terminals
+# still render as mojibake; ASCII wherever full Unicode is not available.
+_DASH, _ELL = ("—", "…") if _UNICODE else ("-", "...")
+
+
 def _c(code: str, s: str) -> str:
     return f"\033[{code}m{s}\033[0m" if _COLOR else s
 
@@ -23,7 +45,7 @@ bold = lambda s: _c("1", s)
 
 def _bar(rate: float, width: int = 24) -> str:
     filled = round(rate * width)
-    body = "█" * filled + "░" * (width - filled)
+    body = _FULL * filled + _EMPTY * (width - filled)
     color = green if rate >= 0.9 else yellow if rate >= 0.7 else red
     return color(body)
 
@@ -46,7 +68,7 @@ def render_run(run: Run, *, verbose: bool = False) -> str:
     summary = f"{run.passed}/{run.n} passed"
     color = green if rate == 1 else yellow if rate >= 0.7 else red
     out.append(f"\n  {_bar(rate)}  {color(f'{rate*100:.0f}%')}  {summary}"
-               f"  {dim(f'· mean {run.mean_score:.2f} · {run.total_ms:.0f}ms total')}")
+               f"  {dim(f'{_DOT} mean {run.mean_score:.2f} {_DOT} {run.total_ms:.0f}ms total')}")
     return "\n".join(out)
 
 
@@ -57,7 +79,7 @@ def render_diff(d: Diff) -> str:
     out = [f"\n{bold('compare ' + d.eval)}   {head}  ({delta:+.0f} pts)"]
 
     if d.regressions:
-        out.append(red(f"\n  {len(d.regressions)} regression(s) — were passing, now failing:"))
+        out.append(red(f"\n  {len(d.regressions)} regression(s) {_DASH} were passing, now failing:"))
         for r in d.regressions:
             out.append(f"    {red('-')} {r['case_id']}: {dim(r['why'])}")
             out.append(dim(f"        got {str(r['output'])[:80]!r}"))
@@ -74,5 +96,36 @@ def render_diff(d: Diff) -> str:
         out.append(dim(f"  {len(d.removed)} removed case(s): " + ", ".join(d.removed)))
 
     if not (d.regressions or d.fixes or d.score_drops):
-        out.append(green("\n  no changes — stable."))
+        out.append(green(f"\n  no changes {_DASH} stable."))
+    return "\n".join(out)
+
+
+def render_violations(violations: list) -> str:
+    """Why the gate said no. One line per broken rule, rule name first, because
+    the first question after a red build is always 'which bar did I miss'."""
+    if not violations:
+        return green(f"\n  gate passed {_DASH} every rule in assay.toml is satisfied.")
+    out = [red(f"\n  GATE FAILED {_DASH} {len(violations)} rule(s) broken:")]
+    for v in violations:
+        where = dim(f" [{v.eval}]") if v.eval else ""
+        out.append(f"    {red('x')} {bold(v.rule)}{where}  {v.detail}")
+    return "\n".join(out)
+
+
+def render_verification(v) -> str:
+    """The integrity check, phrased the way it would be quoted to someone who
+    is not going to run it themselves."""
+    if v.records == 0:
+        return dim(f"\n  no ledger yet {_DASH} run an eval to start the record.")
+    if v.ok:
+        extra = f" {_DOT} {v.attested} attested" if v.attested else ""
+        return (green(f"\n  VERIFIED  {v.records} record(s), unbroken chain")
+                + dim(f"\n  {v.checked_files} run file(s) match their recorded digest"
+                      f"{extra}\n  fingerprint {v.fingerprint}"))
+    out = [red(f"\n  NOT VERIFIED {_DASH} {len(v.problems)} problem(s):")]
+    for p in v.problems[:12]:
+        out.append(f"    {red('x')} {p}")
+    if len(v.problems) > 12:
+        out.append(dim(f"    {_ELL} and {len(v.problems) - 12} more"))
+    out.append(dim("\n  This history has been altered since it was written."))
     return "\n".join(out)

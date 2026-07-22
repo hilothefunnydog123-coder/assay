@@ -1,7 +1,13 @@
 __pycache__/
 *.pyc
-.assay/
 dist/
 build/
 *.egg-info/
 .pytest_cache/
+evidence.html
+evidence.json
+
+# .assay/ is ignored *here* because this repo's runs are throwaway test output.
+# In your own project, do the opposite: commit .assay/. The ledger is the
+# evidence, and it is only worth something if it travels with the code.
+.assay/

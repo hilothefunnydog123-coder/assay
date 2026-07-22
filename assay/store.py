@@ -20,13 +20,26 @@ def _eval_dir(name: str, root: str = ROOT) -> str:
     return os.path.join(root, "runs", safe)
 
 
-def save(run: Run, root: str = ROOT) -> str:
+def save(run: Run, root: str = ROOT, *, ledger: bool = True) -> str:
+    """Write the run file and append it to the tamper-evident ledger.
+
+    Order matters: the file lands first, then the ledger records its digest. A
+    crash between the two leaves an unrecorded run (visible, harmless) rather
+    than a ledger entry pointing at nothing (a verification failure).
+    """
     d = _eval_dir(run.eval, root)
     os.makedirs(d, exist_ok=True)
     stamp = run.started_at.replace(":", "-")
     path = os.path.join(d, f"{stamp}.json")
+    payload = run.to_dict()
     with open(path, "w") as f:
-        json.dump(run.to_dict(), f, indent=2, default=str)
+        json.dump(payload, f, indent=2, default=str)
+    if ledger:
+        from . import ledger as _ledger
+        # The digest must cover exactly the bytes a verifier will re-read, so
+        # round-trip through JSON rather than hashing the in-memory objects.
+        with open(path, "r", encoding="utf-8") as f:
+            _ledger.append(json.load(f), path, root)
     return path
 
 

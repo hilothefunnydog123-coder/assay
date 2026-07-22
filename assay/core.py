@@ -56,6 +56,15 @@ class Run:
     pass_rate: float
     mean_score: float
     total_ms: float
+    # --- evidence metadata ------------------------------------------------ #
+    controls: list[str] = field(default_factory=list)
+    system: str = ""
+    owner: str = ""
+    # Digest of the eval *definition* (cases + scorers), not its results. Lets a
+    # reader tell "the system changed" from "the test changed" — a pass rate
+    # that rose because cases were deleted is the failure mode every eval tool
+    # has and none of them surface.
+    suite_hash: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -73,11 +82,19 @@ class Eval:
     """
 
     def __init__(self, name: str, task: Optional[Callable] = None,
-                 cases: Optional[list] = None, scorers: Optional[list[Scorer]] = None):
+                 cases: Optional[list] = None, scorers: Optional[list[Scorer]] = None,
+                 controls: Optional[list[str]] = None, system: str = "",
+                 owner: str = "", description: str = ""):
         self.name = name
         self._task = task
         self.cases: list[Case] = []
         self.scorers: list[Scorer] = list(scorers or [])
+        # Evidence metadata: which assurance controls this eval produces evidence
+        # for, which system it covers, and who answers for it. See controls.py.
+        self.controls: list[str] = list(controls or [])
+        self.system = system
+        self.owner = owner
+        self.description = description
         for c in (cases or []):
             self.add(**c) if isinstance(c, dict) else self.cases.append(c)
 
@@ -94,6 +111,24 @@ class Eval:
     def scorer(self, *scorers: Scorer):
         self.scorers.extend(scorers)
         return self
+
+    def control(self, *ids: str):
+        """Declare the assurance controls this eval produces evidence for."""
+        self.controls.extend(ids)
+        return self
+
+    # --- identity --------------------------------------------------------- #
+    def suite_hash(self) -> str:
+        """Digest of what this eval *tests* — case inputs, expectations, and the
+        scorers applied. Independent of the results, so two runs of an unchanged
+        suite share a hash and a weakened suite announces itself."""
+        from .ledger import digest
+        return digest({
+            "name": self.name,
+            "cases": [{"id": c.id, "input": c.input, "expect": c.expect}
+                      for c in self.cases],
+            "scorers": [_scorer_name(s) for s in self.scorers],
+        })
 
     # --- execution -------------------------------------------------------- #
     def run(self, now: Optional[str] = None) -> Run:
@@ -142,4 +177,31 @@ class Eval:
             pass_rate=passed / n if n else 0.0,
             mean_score=sum(r.score for r in results) / n if n else 0.0,
             total_ms=sum(r.latency_ms for r in results),
+            controls=list(self.controls),
+            system=self.system,
+            owner=self.owner,
+            suite_hash=self.suite_hash(),
         )
+
+
+def _scorer_name(s: Scorer) -> str:
+    """A stable identity for a scorer, including its configuration.
+
+    Built-ins that are factories (``contains("refund")``) return a closure named
+    ``scorer``; the useful name is the factory's, and the useful configuration is
+    in the closure cells. Capturing both means loosening a threshold changes the
+    suite hash instead of slipping through as "same tests, better score".
+    """
+    base = (getattr(s, "__qualname__", None) or getattr(s, "__name__", None)
+            or type(s).__name__)
+    base = base.replace(".<locals>.scorer", "")
+    cfg = []
+    for cell in (getattr(s, "__closure__", None) or ()):
+        try:
+            value = cell.cell_contents
+        except ValueError:      # cell not yet filled (recursive closure)
+            continue
+        if callable(value):     # a judge or embedder — identity, not config
+            continue
+        cfg.append(repr(value))
+    return f"{base}({', '.join(cfg)})" if cfg else base

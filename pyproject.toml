@@ -4,18 +4,23 @@ build-backend = "hatchling.build"
 
 [project]
 name = "assay-evals"
-version = "0.1.0"
-description = "Unit tests for AI agents — know if your agent actually works, and catch regressions before your users do."
+version = "0.2.0"
+description = "Verifiable evals for AI systems — gate the build on quality, and prove it was tested with a tamper-evident record."
 readme = "README.md"
 requires-python = ">=3.9"
 license = "MIT"
 authors = [{ name = "Neil Gilani" }]
-keywords = ["ai", "llm", "agents", "evals", "evaluation", "testing", "regression", "reliability"]
+keywords = ["ai", "llm", "agents", "evals", "evaluation", "testing", "regression",
+            "reliability", "audit", "compliance", "governance", "eu-ai-act",
+            "nist-ai-rmf", "iso-42001", "owasp-llm", "red-teaming", "prompt-injection"]
 classifiers = [
-  "Development Status :: 3 - Alpha",
+  "Development Status :: 4 - Beta",
   "Intended Audience :: Developers",
+  "Intended Audience :: Legal Industry",
   "Programming Language :: Python :: 3",
   "Topic :: Software Development :: Testing",
+  "Topic :: Security",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = []   # zero runtime dependencies, by design
 

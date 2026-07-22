@@ -130,6 +130,220 @@ def test_example_runs():
     print("ok  bundled example runs green")
 
 
+# --- ledger: the evidence claim ------------------------------------------- #
+def _seed(root, n=3, name="router"):
+    """n saved runs of a trivial eval, so there is a chain to attack."""
+    for i in range(n):
+        ev = Eval(name, task=lambda x: x["k"], scorers=[S.exact_match],
+                  controls=["nist:measure-2.5"], system="demo", owner="me@example.com")
+        ev.add(input={"k": "a"}, expect="a", id="a")
+        store.save(ev.run(now=f"2026-01-0{i+1}T00:00:00"), root=root)
+
+
+def test_ledger_verifies_clean_history():
+    from assay import ledger
+    with tempfile.TemporaryDirectory() as root:
+        _seed(root, 3)
+        v = ledger.verify(root)
+        assert v.ok and v.records == 3 and v.checked_files == 3
+        assert len(v.fingerprint) == 16
+        # Chain linkage is real, not decorative.
+        es = ledger.entries(root)
+        assert es[0]["prev_hash"] == ledger.GENESIS
+        assert es[1]["prev_hash"] == es[0]["record_hash"]
+    print("ok  ledger verifies an untouched history")
+
+
+def test_ledger_catches_edited_run_file():
+    from assay import ledger
+    with tempfile.TemporaryDirectory() as root:
+        _seed(root, 2)
+        target = os.path.join(root, ledger.entries(root)[0]["run_file"])
+        with open(target) as f:
+            run = json.load(f)
+        run["pass_rate"] = 0.0                      # rewrite history
+        with open(target, "w") as f:
+            json.dump(run, f, indent=2)
+        v = ledger.verify(root)
+        assert not v.ok and any("no longer matches" in p for p in v.problems)
+    print("ok  ledger catches a doctored run file")
+
+
+def test_ledger_catches_edited_and_deleted_records():
+    from assay import ledger
+    with tempfile.TemporaryDirectory() as root:
+        _seed(root, 4)
+        p = ledger.path_for(root)
+
+        lines = open(p).read().splitlines()
+        rec = json.loads(lines[1]); rec["n"] = 99            # inflate in place
+        lines[1] = json.dumps(rec, sort_keys=True)
+        open(p, "w").write("\n".join(lines) + "\n")
+        v = ledger.verify(root)
+        assert not v.ok and any("modified after it was written" in x for x in v.problems)
+
+        lines = open(p).read().splitlines()
+        del lines[1]                                          # delete a bad run
+        open(p, "w").write("\n".join(lines) + "\n")
+        v = ledger.verify(root)
+        assert not v.ok and any("chain broken" in x for x in v.problems)
+    print("ok  ledger catches in-place edits and deletions")
+
+
+def test_attestation_requires_the_key():
+    from assay import ledger
+    with tempfile.TemporaryDirectory() as root:
+        ev = Eval("router", task=lambda x: "a", scorers=[S.exact_match])
+        ev.add(input={}, expect="a")
+        run = ev.run(now="2026-01-01T00:00:00")
+        path = store.save(run, root=root, ledger=False)
+        ledger.append(json.load(open(path)), path, root, key="ci-key")
+
+        assert ledger.verify(root, key="ci-key").ok
+        bad = ledger.verify(root, key="wrong-key")
+        assert not bad.ok and any("attestation" in p for p in bad.problems)
+    print("ok  attestation binds records to the key that wrote them")
+
+
+# --- suite identity: the anti-gaming property ----------------------------- #
+def test_suite_hash_tracks_the_tests_not_the_results():
+    a = Eval("x", task=lambda i: i, scorers=[S.exact_match])
+    a.add(input="1", expect="1"); a.add(input="2", expect="2")
+    b = Eval("x", task=lambda i: "always wrong", scorers=[S.exact_match])
+    b.add(input="1", expect="1"); b.add(input="2", expect="2")
+    assert a.suite_hash() == b.suite_hash(), "same tests, different results"
+
+    c = Eval("x", task=lambda i: i, scorers=[S.exact_match])
+    c.add(input="1", expect="1")                      # a case was dropped
+    assert c.suite_hash() != a.suite_hash()
+
+    d = Eval("x", task=lambda i: i, scorers=[S.similarity(0.9)])
+    d.add(input="1", expect="1"); d.add(input="2", expect="2")
+    e = Eval("x", task=lambda i: i, scorers=[S.similarity(0.2)])   # loosened
+    e.add(input="1", expect="1"); e.add(input="2", expect="2")
+    assert d.suite_hash() != e.suite_hash(), "scorer config must be part of identity"
+    print("ok  suite hash tracks the tests, including scorer configuration")
+
+
+# --- the gate -------------------------------------------------------------- #
+def test_gate_rules():
+    from assay import policy
+    from assay.policy import Gate
+
+    run = {"eval": "r", "pass_rate": 0.8, "n": 5, "controls": ["a"],
+           "suite_hash": "h1", "results": [{"latency_ms": 10}]}
+    assert policy.check_run(run, Gate(min_pass_rate=0.95))[0].rule == "min_pass_rate"
+    assert not policy.check_run(run, Gate(min_pass_rate=0.75))
+
+    class D:
+        regressions = [{"case_id": "b"}]
+        score_drops = []
+    assert policy.check_run(run, Gate(), diff=D())[0].rule == "allow_regressions"
+
+    assert policy.check_run(run, Gate(require_controls=["a", "z"]))[0].rule \
+        == "require_controls"
+
+    # A per-eval override must beat the global floor.
+    g = Gate(min_pass_rate=0.5, per_eval={"r": {"min_pass_rate": 0.99}})
+    assert policy.check_run(run, g)[0].rule == "min_pass_rate"
+    print("ok  gate enforces floors, regressions, controls, and overrides")
+
+
+def test_gate_catches_deleting_the_failing_case():
+    """The cheapest way to make a red build green is to delete the test. That is
+    the one move every other eval tool lets through silently."""
+    from assay import policy
+    before = {"eval": "r", "pass_rate": 0.8, "n": 5, "suite_hash": "h1"}
+    after = {"eval": "r", "pass_rate": 1.0, "n": 4, "suite_hash": "h2",
+             "results": [], "controls": []}
+    vs = policy.check_run(after, policy.Gate(require_suite_stable=True),
+                          previous=before)
+    assert [v.rule for v in vs] == ["require_suite_stable"]
+
+    # An honest suite change — cases added, rate unchanged — is not blocked.
+    honest = {"eval": "r", "pass_rate": 0.8, "n": 7, "suite_hash": "h3",
+              "results": [], "controls": []}
+    assert not policy.check_run(honest, policy.Gate(require_suite_stable=True),
+                                previous=before)
+    print("ok  gate blocks a pass rate bought by deleting cases")
+
+
+def test_gate_config_roundtrip():
+    from assay.policy import Gate
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "assay.toml")
+        with open(p, "w") as f:
+            f.write('[gate]\nmin_pass_rate = 0.9\nallow_regressions = 2\n'
+                    'require_controls = ["owasp-llm:llm01"]\n'
+                    'require_suite_stable = true\n\n'
+                    '[gate.evals."safety-x"]\nmin_pass_rate = 1.0\n')
+        g = Gate.load(p)
+        assert g.min_pass_rate == 0.9 and g.allow_regressions == 2
+        assert g.require_controls == ["owasp-llm:llm01"] and g.require_suite_stable
+        assert g.for_eval("safety-x").min_pass_rate == 1.0
+        assert g.for_eval("other").min_pass_rate == 0.9
+    print("ok  assay.toml parses, including per-eval overrides")
+
+
+# --- controls + audit ------------------------------------------------------ #
+def test_controls_and_coverage():
+    from assay import controls
+    assert controls.get("owasp-llm:llm01").framework == "OWASP LLM Top 10"
+    assert controls.unknown(["owasp-llm:llm01", "made-up"]) == ["made-up"]
+    cov = controls.coverage({"safety": ["owasp-llm:llm01"], "other": ["owasp-llm:llm01"]})
+    assert sorted(cov["owasp-llm:llm01"]["evals"]) == ["other", "safety"]
+    print("ok  control catalogue and coverage mapping")
+
+
+def test_audit_pack():
+    from assay import audit
+    with tempfile.TemporaryDirectory() as root:
+        _seed(root, 3)
+        ev = audit.collect(root, now="2026-01-09T00:00:00")
+        assert len(ev.evals) == 1 and ev.total_runs == 3
+        assert ev.verification.ok and ev.pass_rate == 1.0
+        assert "nist:measure-2.5" in ev.coverage
+
+        blob = audit.to_json(ev)
+        assert blob["integrity"]["verified"] and blob["summary"]["runs"] == 3
+
+        html = audit.render(ev)
+        assert "Record verified" in html and "MEASURE 2.5" in html
+        assert "{" not in html.split("<style>")[0], "template placeholders unfilled"
+
+        # A tampered record must be stated on the face of the document.
+        with open(os.path.join(root, "ledger.jsonl"), "a") as f:
+            f.write('{"seq": 99, "record_hash": "x", "prev_hash": "y"}\n')
+        ev2 = audit.collect(root, now="2026-01-09T00:00:00")
+        assert "Record NOT verified" in audit.render(ev2)
+    print("ok  audit pack reports coverage, integrity, and tampering")
+
+
+# --- scaffolding ----------------------------------------------------------- #
+def test_init_scaffold_is_green_out_of_the_box():
+    """`assay init` must produce evals that run and pass. A red first run would
+    read as 'this tool is broken', not 'your agent is'."""
+    from assay import packs
+    from assay.cli import main
+    with tempfile.TemporaryDirectory() as d:
+        written = packs.init(d, ci=True)
+        assert "assay.toml" in written and ".github/workflows/assay.yml" in written
+
+        cwd = os.getcwd()
+        try:
+            os.chdir(d)
+            assert main(["run", "evals/", "--gate"]) == 0
+            assert main(["verify"]) == 0
+            assert main(["audit", "-o", "e.html", "--system", "T"]) == 0
+            assert os.path.getsize("e.html") > 2000
+        finally:
+            os.chdir(cwd)
+
+        # Re-running init must never clobber someone's work.
+        assert packs.init(d) == []
+    print("ok  scaffold runs green, gates, verifies, and audits end to end")
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
