@@ -27,6 +27,8 @@ evals/safety.py       prompt injection, secret + system-prompt leakage, PII in o
 evals/quality.py      your golden set — the answers you know are right
 evals/structure.py    the schema your downstream code assumes
 assay.toml            the bar the build has to clear
+
+assay init --pack rag  # + grounding, abstention, and citation checks
 ```
 
 They pass out of the box on purpose. Replace the placeholder `system_under_test` with a call to your agent, and the first thing that turns red is your system, not the scaffolding.
@@ -67,6 +69,31 @@ GATE FAILED - 1 rule(s) broken:
 ```
 
 That last rule is the one nothing else in this category has. The cheapest way to make a red eval green is to delete the failing case, and every other tool reports the result as an improvement. Assay hashes the suite *definition* — cases, expectations, and scorer configuration — separately from its results, so loosening a threshold or dropping a case announces itself instead of showing up as progress.
+
+## A pass rate is an estimate, not a measurement
+
+Two things are wrong with "19/20 passed, ship it", and both are load-bearing.
+
+**The sample is small.** 19/20 and 190/200 are both "95%", but one of them is a coin you have flipped ten times as often. Every run carries a Wilson 95% confidence interval, and you can gate on the lower bound instead of the point estimate:
+
+```
+  ████████████████████░░░░  95%  19/20 passed  · 95% CI 76–99%  · mean 0.98
+```
+
+A suite that scores 100% on 3 cases has a lower bound of 44%. `min_lower_bound = 0.8` rejects it. The observed rate alone would have shipped it.
+
+**A model is not a function.** Run the same case twice at temperature and it can pass once and fail once. One run cannot see that — it records whichever outcome it got and calls the case settled.
+
+```bash
+assay run evals/ --repeat 5      # each case five times
+```
+
+```
+  PASS         stable       5/5 trials
+  FAIL FLAKY   escalation   3/5 trials
+```
+
+A case must pass **every** trial to count. A check that only sometimes holds is not a check you can gate a release behind, so flaky cases fail, and `max_flaky = 0` refuses to ship any at all.
 
 ## Proof, not a dashboard
 
@@ -119,6 +146,23 @@ Tag an eval with what it proves; `assay controls` lists the catalogue.
 
 A mapping says *this eval produces evidence relevant to that requirement*. It is not a compliance determination — whether your evidence is sufficient is a call for your counsel and your auditor. Assay's job is to make the evidence real, dated, and verifiable so that call has something to stand on.
 
+### The questionnaire
+
+When the spreadsheet arrives, export the answer:
+
+```bash
+assay questionnaire --system "Support Assistant" -o answers.csv   # or .md / .json
+```
+
+One row per control, answered from the verified ledger:
+
+| Ref | Control | Status | Evidence |
+|---|---|---|---|
+| Art. 15 | Accuracy, robustness, cybersecurity | ✅ evidenced | `safety-prompt-injection`, `safety-disclosure` |
+| MEASURE 2.11 | Fairness and bias | ⬜ not evidenced | — |
+
+A control is **evidenced** only if a covering eval is currently passing *and* the hash chain verifies — a green eval whose record has been altered is not evidence, and the export says so rather than claiming coverage the ledger no longer supports. Gaps are listed rather than hidden, because a reviewer trusts a document that admits what it does not cover far more than one that claims everything.
+
 ## Scorers
 
 Pass one or many; a case passes when all of them do.
@@ -133,6 +177,11 @@ Pass one or many; a case passes when all of them do.
 | `similarity(threshold, embed=None)` | close enough — lexical, or semantic with your embedder |
 | `length_between(lo, hi)` | output length is sane |
 | `llm_judge(rubric, judge)` | a model grades open-ended output against a rubric |
+| `no_pii(kinds)` | no SSN or Luhn-valid card number (email/phone/IP opt-in) |
+| `is_refusal` / `not_refusal` | declined when it should — or answered when it should |
+| `grounded(threshold, embed=None)` | the answer is supported by the retrieved context |
+| `no_unsupported_numbers()` | every figure in the answer appears in the sources |
+| `cites(pattern)` | the answer cites where it got the claim |
 
 `llm_judge` and `similarity` take *your* model call, so Assay never ships an API dependency or touches a key:
 
@@ -161,14 +210,15 @@ Commit `.assay/` — the record is the point.
 ## Commands
 
 ```bash
-assay init [--pack safety] [--ci]   scaffold evals, gate config, workflow
-assay run evals/ [--gate]           run, record, diff vs last, enforce the bar
-assay verify                        prove the history has not been altered
-assay audit -o evidence.html        generate the evidence pack
-assay compare <eval>                diff the last two runs
-assay history <eval>                pass rate over time
-assay controls                      list the control catalogue
-assay serve                         local dashboard on 127.0.0.1:8787
+assay init [--pack safety|rag] [--ci]   scaffold evals, gate config, workflow
+assay run evals/ [--gate] [--repeat N]  run, record, diff vs last, enforce the bar
+assay verify                            prove the history has not been altered
+assay audit -o evidence.html            generate the evidence pack
+assay questionnaire -o answers.csv      export control coverage for a security review
+assay compare <eval>                    diff the last two runs
+assay history <eval>                    pass rate over time
+assay controls                          list the control catalogue
+assay serve                             local dashboard on 127.0.0.1:8787
 ```
 
 ## Why it is built this way

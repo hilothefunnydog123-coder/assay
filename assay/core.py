@@ -44,6 +44,14 @@ class CaseResult:
     scores: list[Score]
     latency_ms: float
     error: Optional[str] = None
+    # --- repeated-trial fields (only meaningful when the case ran >1 time) --- #
+    # A model is not a function: the same case at temperature can pass once and
+    # fail once. When ``repeat > 1`` these record how the trials landed, and
+    # ``passed`` above holds the strict verdict — every trial had to pass.
+    trials: int = 1
+    trial_passes: int = 1
+    flaky: bool = False
+    consistency: float = 1.0
 
 
 @dataclass
@@ -65,6 +73,13 @@ class Run:
     # that rose because cases were deleted is the failure mode every eval tool
     # has and none of them surface.
     suite_hash: str = ""
+    # --- statistical honesty --------------------------------------------- #
+    # A pass rate is an estimate from a sample, not a measurement. These carry
+    # the Wilson 95% interval around it, how many cases ran, how many trials
+    # each, and how many came out flaky. See assay.stats.
+    repeat: int = 1
+    flaky: int = 0
+    pass_rate_ci: tuple = (0.0, 0.0)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -131,15 +146,26 @@ class Eval:
         })
 
     # --- execution -------------------------------------------------------- #
-    def run(self, now: Optional[str] = None) -> Run:
+    def run(self, now: Optional[str] = None, *, repeat: int = 1) -> Run:
+        """Run every case and score it.
+
+        ``repeat`` runs each case that many times, which is how you catch a
+        nondeterministic system: a case that passes on some trials and fails on
+        others is *flaky*, and a flaky check is treated as failing (it must pass
+        every trial to count), because a check that only sometimes holds is not
+        one you can gate a release behind. With ``repeat=1`` — the default —
+        behaviour and the recorded schema are unchanged.
+        """
         if self._task is None:
             raise ValueError(f"eval '{self.name}': no task registered")
         if not self.cases:
             raise ValueError(f"eval '{self.name}': no cases to run")
         if not self.scorers:
             raise ValueError(f"eval '{self.name}': no scorers registered")
+        repeat = max(1, int(repeat))
 
         import datetime as _dt
+        from . import stats as _stats
         # microsecond precision so two runs in the same second get distinct,
         # correctly-sortable filenames; the report trims this to seconds.
         started = now or _dt.datetime.now().isoformat()
@@ -147,27 +173,12 @@ class Eval:
 
         for i, case in enumerate(self.cases):
             cid = case.id or f"case-{i + 1}"
-            t0 = time.perf_counter()
-            output, error = None, None
-            try:
-                output = self._task(case.input)
-            except Exception:
-                error = traceback.format_exc(limit=3).strip()
-            latency = (time.perf_counter() - t0) * 1000
-
-            if error is not None:
-                results.append(CaseResult(cid, case.input, None, case.expect,
-                                          False, 0.0, [], latency, error))
-                continue
-
-            scores = [s(output, case) for s in self.scorers]
-            passed = all(s.passed for s in scores)
-            mean = sum(s.score for s in scores) / len(scores)
-            results.append(CaseResult(cid, case.input, output, case.expect,
-                                      passed, mean, scores, latency))
+            results.append(self._run_case(cid, case, repeat, _stats))
 
         n = len(results)
         passed = sum(1 for r in results if r.passed)
+        flaky = sum(1 for r in results if r.flaky)
+        ci = _stats.wilson_interval(passed, n) if n else _stats.wilson_interval(0, 0)
         return Run(
             eval=self.name,
             started_at=started,
@@ -181,7 +192,55 @@ class Eval:
             system=self.system,
             owner=self.owner,
             suite_hash=self.suite_hash(),
+            repeat=repeat,
+            flaky=flaky,
+            pass_rate_ci=(round(ci.low, 4), round(ci.high, 4)),
         )
+
+    def _run_case(self, cid: str, case: "Case", repeat: int, _stats) -> CaseResult:
+        """One case, run ``repeat`` times, collapsed to a single strict verdict.
+
+        The first trial's output, scores and latency are the ones recorded so
+        the run file reads the same as a single-shot run; the extra trials feed
+        the flakiness measurement and nothing else. Keeping the recorded shape
+        stable matters: the ledger hashes it, and a reader should not have to
+        special-case repeated runs to read the evidence.
+        """
+        trial_passes: list[bool] = []
+        first: Optional[CaseResult] = None
+        for _ in range(repeat):
+            t0 = time.perf_counter()
+            output, error = None, None
+            try:
+                output = self._task(case.input)
+            except Exception:
+                error = traceback.format_exc(limit=3).strip()
+            latency = (time.perf_counter() - t0) * 1000
+
+            if error is not None:
+                scores, passed, mean = [], False, 0.0
+                res = CaseResult(cid, case.input, None, case.expect,
+                                 False, 0.0, [], latency, error)
+            else:
+                scores = [s(output, case) for s in self.scorers]
+                passed = all(s.passed for s in scores)
+                mean = sum(s.score for s in scores) / len(scores) if scores else 0.0
+                res = CaseResult(cid, case.input, output, case.expect,
+                                 passed, mean, scores, latency)
+            trial_passes.append(passed)
+            if first is None:
+                first = res
+
+        ag = _stats.agreement(trial_passes)
+        first.trials = ag.trials
+        first.trial_passes = ag.passes
+        first.flaky = ag.flaky
+        first.consistency = round(ag.consistency, 4)
+        # Strict verdict: pass only if every trial passed. A flaky case, having
+        # failed at least one trial, therefore does not pass — which is the
+        # whole point of running it more than once.
+        first.passed = ag.verdict
+        return first
 
 
 def _scorer_name(s: Scorer) -> str:

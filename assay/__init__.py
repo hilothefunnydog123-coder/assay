@@ -16,14 +16,16 @@ the moment a prompt or model change breaks something.
 
     run = ev.run()
 """
-from . import controls, ledger, scorers
+from . import controls, ledger, scorers, stats
 from .compare import Diff, diff
 from .core import Case, CaseResult, Eval, Run, Score, Scorer
 from .ledger import Verification, verify
 from .policy import Gate, Violation, check_run
+from .stats import Interval, wilson_interval
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 __all__ = ["Eval", "Case", "CaseResult", "Run", "Score", "Scorer",
            "scorers", "diff", "Diff",
            "controls", "ledger", "verify", "Verification",
-           "Gate", "Violation", "check_run"]
+           "Gate", "Violation", "check_run",
+           "stats", "Interval", "wilson_interval"]

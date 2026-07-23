@@ -39,6 +39,9 @@ Two properties that are hard to bolt onto a SaaS competitor:
 
 - **The hash-chained ledger.** Every run links to the one before it. Edits, deletions, back-dating, and reordering are all detectable by anyone holding the repo — including the customer's auditor, without an account. A vendor-hosted dashboard cannot make this claim credibly, because the vendor can always rewrite its own database.
 - **The suite hash.** The cheapest way to make a red eval green is to delete the failing case. Every other tool reports that as an improvement. Assay hashes the suite *definition* — cases, expectations, and scorer configuration — separately from the results, so `require_suite_stable` blocks a pass rate that was bought by weakening the tests. It is the single feature most likely to be described out loud as "wait, does ours not do that?"
+- **Statistical honesty.** Everyone else reports a pass rate as if it were a measurement. It is an estimate from a small sample of a nondeterministic system, and both halves of that are wrong in the same direction — toward overconfidence. Assay reports a Wilson confidence interval on every run, gates on the lower bound rather than the point estimate, and with `--repeat N` catches cases that pass only some of the time and fails them. A competitor can add this; the reason none has is that it makes your numbers look worse, which is exactly why a buyer performing diligence on a vendor's AI trusts it.
+
+The three compound into one sentence that no dashboard can say: *this system was tested, here is what it scored, here is how confident that score is, and here is proof nobody edited any of it afterwards.*
 
 ## 4. Who buys
 
@@ -62,8 +65,9 @@ The line is **developer vs. company**, not features-with-holes-in-them. Anything
 | Hash-chained ledger, `assay verify` | Branded evidence packs, retention, shareable verification link |
 | Control tagging and coverage | Multi-repo coverage across every AI system you ship |
 | `assay audit` evidence pack | PR bot: the eval diff and control delta as a comment |
-| The gate, `assay init`, CI workflow | Questionnaire export (CAIQ / VSA / custom control mappings) |
-| | Priority support, mapping review |
+| The gate, `assay init`, CI workflow | Custom control mappings and framework packs |
+| `assay questionnaire` export | Priority support, mapping review |
+| Confidence intervals, flakiness detection | |
 
 Note what is *not* on the paid side: no case limits, no run limits, no "free for 7 days of history." Metering the thing developers do hourly is how open-core tools lose the developers.
 
@@ -110,12 +114,22 @@ Stated plainly, so it can be checked rather than rationalised later:
 
 ## 10. What is done and what is next
 
-**Done (v0.2, in this repository):**
-hash-chained ledger with HMAC attestation · `assay verify` detecting edits, deletions, reordering, and back-dating · suite hashing including scorer configuration · policy gate with per-eval overrides and `require_suite_stable` · control catalogue across OWASP LLM / NIST AI RMF / EU AI Act / ISO 42001 / SOC 2 · `assay audit` HTML and JSON evidence packs · `assay init` with runnable safety, quality, and structure packs · CI workflow scaffold · Windows console fix · 19 passing tests.
+**Done (v0.2):**
+hash-chained ledger with HMAC attestation · `assay verify` detecting edits, deletions, reordering, and back-dating · suite hashing including scorer configuration · policy gate with per-eval overrides and `require_suite_stable` · control catalogue across OWASP LLM / NIST AI RMF / EU AI Act / ISO 42001 / SOC 2 · `assay audit` HTML and JSON evidence packs · `assay init` with runnable safety, quality, and structure packs · CI workflow scaffold · Windows console fix.
+
+**Done (v0.3, in this repository):**
+
+- **`assay init --pack rag`** — grounding, abstention, and citation evals. Three new scorers behind it: `grounded` (lexical or, with your embedder, semantic), `no_unsupported_numbers` (every figure in the answer appears in the sources — the precise, high-signal hallucination check), and `cites`. This closes the gap that was item 3 on the old list, and it is the pack most teams will install first.
+- **Statistical honesty** — Wilson confidence intervals on every run; `--repeat N` to catch nondeterministic cases; a flaky case fails rather than passing. Two new gate rules: `min_lower_bound` and `max_flaky`.
+- **`assay questionnaire`** — control coverage exported as CSV, Markdown or JSON, answered from the verified ledger, with gaps shown rather than hidden. This was scoped as a paid feature; shipping it free is deliberate (see below).
+- **Safety scorers promoted to first class** — `no_pii` (Luhn-validated, so an order number is not reported as a card) and `is_refusal`/`not_refusal`, which also catches over-refusal: a model quietly declining legitimate work is a real regression nobody tests for.
+- 29 passing tests, zero dependencies, Python 3.9+.
+
+**A revision to §5.** The plan had questionnaire export on the paid side. It ships free. The reason: the questionnaire is the moment the tool proves its worth, and putting it behind a wall means the developer who installed Assay for the gate never sees the thing that makes their manager care. Sell the *organisation* layer instead — attestation key management, cross-repo coverage, retention, the shareable verification link, the PR bot. Those are genuinely company-shaped and cannot be replicated by a single developer with a local checkout, which is the correct test for what belongs on the paid side.
 
 **Next, in order:**
-1. Publish 0.2.0 to PyPI.
-2. Write the suite-deletion post; it is the only marketing asset that matters right now.
-3. `assay init --pack rag` (grounding and citation checks) — the most requested eval nobody has.
+1. Publish 0.3.0 to PyPI.
+2. Write the suite-deletion post; still the only marketing asset that matters.
+3. A second post on flaky evals — "your eval suite is 95% and you do not know the error bars" — now that the code backs it.
 4. Recruit ten design partners.
 5. Hosted verification link, then the PR bot. Not before step 4.

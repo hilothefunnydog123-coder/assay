@@ -129,6 +129,13 @@ class Gate:
     require_controls: list[str] = field(default_factory=list)
     require_suite_stable: bool = False
     max_mean_latency_ms: float = 0.0        # 0 = unenforced
+    # Statistical honesty. ``min_lower_bound`` gates on the Wilson 95% lower
+    # bound rather than the point estimate — "we are confident the true rate is
+    # at least X" — which stops a 3/3 = 100% run from clearing a bar it has not
+    # earned the evidence for. ``max_flaky`` bounds cases whose repeated trials
+    # disagreed; -1 leaves it unenforced.
+    min_lower_bound: float = 0.0
+    max_flaky: int = -1
     per_eval: dict = field(default_factory=dict)
 
     @classmethod
@@ -145,6 +152,8 @@ class Gate:
             require_controls=list(cfg.get("require_controls", []) or []),
             require_suite_stable=bool(cfg.get("require_suite_stable", False)),
             max_mean_latency_ms=float(cfg.get("max_mean_latency_ms", 0.0)),
+            min_lower_bound=float(cfg.get("min_lower_bound", 0.0)),
+            max_flaky=int(cfg.get("max_flaky", -1)),
             per_eval={k: v for k, v in per_eval.items() if isinstance(v, dict)},
         )
 
@@ -179,6 +188,24 @@ def check_run(run: dict, gate: Gate, diff=None, previous: Optional[dict] = None
         out.append(Violation("min_pass_rate",
                              f"{rate*100:.0f}% is below the {g.min_pass_rate*100:.0f}% floor",
                              name))
+
+    if g.min_lower_bound:
+        ci = run.get("pass_rate_ci") or (0.0, 0.0)
+        lo = ci[0] if ci else 0.0
+        if lo < g.min_lower_bound:
+            out.append(Violation(
+                "min_lower_bound",
+                f"95% lower bound {lo*100:.0f}% is below the required "
+                f"{g.min_lower_bound*100:.0f}% — the sample is too small or too "
+                f"mixed to be confident in the rate", name))
+
+    if g.max_flaky >= 0:
+        flaky = run.get("flaky", 0) or 0
+        if flaky > g.max_flaky:
+            out.append(Violation(
+                "max_flaky",
+                f"{flaky} flaky case(s) exceed the limit of {g.max_flaky}; a check "
+                f"that passes only some of the time is not passing", name))
 
     if diff is not None:
         n = len(diff.regressions)

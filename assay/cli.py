@@ -81,7 +81,7 @@ def cmd_run(args) -> int:
 
         prior = store.history(ev.name)
         prev = prior[-1] if prior else None      # newest existing run = baseline
-        run = ev.run()
+        run = ev.run(repeat=args.repeat)
         store.save(run)
         print(report.render_run(run, verbose=args.verbose))
 
@@ -132,6 +132,32 @@ def cmd_audit(args) -> int:
           + (f"  ({v.fingerprint})" if v and v.ok else ""))
     print()
     return EXIT_OK if (v and v.ok) else EXIT_TAMPER
+
+
+def cmd_questionnaire(args) -> int:
+    """Export control coverage as the artifact a security review asks for."""
+    import datetime as _dt
+
+    from . import questionnaire as _q
+    ev = _audit.collect(args.root, system=args.system,
+                        now=_dt.datetime.now().isoformat(timespec="seconds"))
+    if not ev.evals:
+        print("no runs found — run some evals first", file=sys.stderr)
+        return EXIT_USAGE
+    fw = args.framework or None
+    q = _q.build(ev, frameworks=fw)
+    path = _q.write(q, args.out)
+    s = q.summary()
+    print(f"\n  {report.bold('questionnaire')}  {path}")
+    print(f"    system     {q.system or '(unnamed)'}")
+    print(f"    coverage   {s['evidenced']} evidenced · {s['partial']} partial · "
+          f"{s['not evidenced']} not evidenced")
+    print(f"    frameworks {', '.join(q.frameworks)}")
+    status = "verified" if q.verified else "NOT VERIFIED"
+    print(f"    integrity  {status}"
+          + (f"  ({q.fingerprint})" if q.verified else ""))
+    print()
+    return EXIT_OK if q.verified else EXIT_TAMPER
 
 
 def cmd_controls(args) -> int:
@@ -196,6 +222,9 @@ def main(argv=None) -> int:
     r.add_argument("--gate", action="store_true",
                    help="enforce assay.toml; exit 3 if the bar is not met")
     r.add_argument("--config", help="path to assay.toml (default: nearest one)")
+    r.add_argument("--repeat", type=int, default=1, metavar="N",
+                   help="run each case N times to catch nondeterministic "
+                        "(flaky) behaviour; a case must pass every trial")
     r.set_defaults(fn=cmd_run)
 
     v = sub.add_parser("verify", help="check the recorded history has not been altered")
@@ -210,6 +239,16 @@ def main(argv=None) -> int:
     a.add_argument("--system", default="", help="name of the system under test")
     a.add_argument("--root", default=store.ROOT)
     a.set_defaults(fn=cmd_audit)
+
+    q = sub.add_parser("questionnaire",
+                       help="export control coverage for a security review")
+    q.add_argument("-o", "--out", default="questionnaire.csv",
+                   help="output path: .csv (default), .md, or .json")
+    q.add_argument("--system", default="", help="name of the system under test")
+    q.add_argument("--framework", action="append",
+                   help="restrict to a framework (repeatable); default: all covered")
+    q.add_argument("--root", default=store.ROOT)
+    q.set_defaults(fn=cmd_questionnaire)
 
     ctl = sub.add_parser("controls", help="list the control catalogue")
     ctl.set_defaults(fn=cmd_controls)
@@ -228,7 +267,7 @@ def main(argv=None) -> int:
 
     args = p.parse_args(argv)
     if args.cmd == "init" and not args.pack:
-        args.pack = tuple(_packs.FILES)
+        args.pack = _packs.DEFAULT_PACKS
     return args.fn(args)
 
 

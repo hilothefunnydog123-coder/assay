@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "assay-evals"
-version = "0.2.0"
+version = "0.3.0"
 description = "Verifiable evals for AI systems — gate the build on quality, and prove it was tested with a tamper-evident record."
 readme = "README.md"
 requires-python = ">=3.9"

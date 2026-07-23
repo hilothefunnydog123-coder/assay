@@ -54,7 +54,10 @@ def render_run(run: Run, *, verbose: bool = False) -> str:
     out = [f"\n{bold(run.eval)}  {dim(run.started_at[:19])}"]
     for r in run.results:
         mark = green("PASS") if r.passed else red("FAIL")
-        head = f"  {mark}  {r.case_id}  {dim(f'{r.latency_ms:.0f}ms')}"
+        flag = yellow(" FLAKY") if getattr(r, "flaky", False) else ""
+        head = f"  {mark}{flag}  {r.case_id}  {dim(f'{r.latency_ms:.0f}ms')}"
+        if getattr(r, "trials", 1) > 1:
+            head += dim(f"  {r.trial_passes}/{r.trials} trials")
         out.append(head)
         if not r.passed or verbose:
             if r.error:
@@ -67,8 +70,15 @@ def render_run(run: Run, *, verbose: bool = False) -> str:
     rate = run.pass_rate
     summary = f"{run.passed}/{run.n} passed"
     color = green if rate == 1 else yellow if rate >= 0.7 else red
-    out.append(f"\n  {_bar(rate)}  {color(f'{rate*100:.0f}%')}  {summary}"
-               f"  {dim(f'{_DOT} mean {run.mean_score:.2f} {_DOT} {run.total_ms:.0f}ms total')}")
+    # The confidence interval is the honest version of the pass rate: it says
+    # how much the sample size actually supports. A reader who only reads one
+    # number should read one that carries its own uncertainty.
+    lo, hi = run.pass_rate_ci if getattr(run, "pass_rate_ci", None) else (0.0, 0.0)
+    ci = dim(f"  {_DOT} 95% CI {lo*100:.0f}{_DASH}{hi*100:.0f}%") if run.n else ""
+    flaky = yellow(f"  {_DOT} {run.flaky} flaky") if getattr(run, "flaky", 0) else ""
+    trials = dim(f"  {_DOT} {run.repeat}x") if getattr(run, "repeat", 1) > 1 else ""
+    out.append(f"\n  {_bar(rate)}  {color(f'{rate*100:.0f}%')}  {summary}{ci}{flaky}{trials}"
+               f"  {dim(f'{_DOT} mean {run.mean_score:.2f}')}")
     return "\n".join(out)
 
 

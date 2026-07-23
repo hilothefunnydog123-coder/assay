@@ -344,6 +344,230 @@ def test_init_scaffold_is_green_out_of_the_box():
     print("ok  scaffold runs green, gates, verifies, and audits end to end")
 
 
+# --- statistics: the pass rate is an estimate ----------------------------- #
+def test_wilson_interval_is_honest_at_small_n():
+    from assay import stats
+    # Reference values (Wilson score interval, 95%, 19/20).
+    i = stats.wilson_interval(19, 20)
+    assert abs(i.low - 0.76387) < 1e-4 and abs(i.high - 0.99112) < 1e-4
+    # The headline property: 3/3 is "100%" but the evidence is thin, and the
+    # interval says so instead of implying certainty.
+    tiny = stats.wilson_interval(3, 3)
+    assert tiny.point == 1.0 and tiny.low < 0.5 and tiny.high == 1.0
+    # Ten times the sample, same rate, a much tighter interval.
+    assert stats.wilson_interval(190, 200).width < stats.wilson_interval(19, 20).width
+    # Never escapes [0, 1] — the failure mode of the Wald interval it replaces.
+    for passed, n in ((0, 1), (1, 1), (0, 30), (30, 30), (0, 0)):
+        w = stats.wilson_interval(passed, n)
+        assert 0.0 <= w.low <= w.high <= 1.0
+    print("ok  Wilson interval: correct, bounded, and honest about small n")
+
+
+def test_agreement_and_two_proportion():
+    from assay import stats
+    assert stats.agreement([True, True, True]).verdict          # unanimous pass
+    assert not stats.agreement([True, True, True]).flaky
+    mixed = stats.agreement([True, False, True, True])
+    assert mixed.flaky and not mixed.verdict, "a flaky case must not pass"
+    assert mixed.majority_verdict() and abs(mixed.consistency - 0.75) < 1e-9
+    # A two-case swing on a 50-case suite is noise, and the p-value says so —
+    # nowhere near significance, so a diff should not raise an alarm on it.
+    assert stats.two_proportion_p(48, 50, 46, 50) > 0.05
+    assert stats.two_proportion_p(48, 50, 47, 50) > 0.05
+    # A collapse from 100% to 50% is not noise.
+    assert stats.two_proportion_p(50, 50, 25, 50) < 0.001
+    print("ok  agreement (flaky != passing) and two-proportion test")
+
+
+def test_repeat_catches_a_flaky_case():
+    """A single run cannot see nondeterminism: it records whichever outcome it
+    happened to get. This is the property that motivates --repeat."""
+    import itertools
+    seq = itertools.count()
+
+    def flip(inp):
+        if inp["k"] != "flip":
+            return inp["k"]
+        return "a" if next(seq) % 2 == 0 else "WRONG"
+
+    ev = Eval("flk", task=flip, scorers=[S.exact_match])
+    ev.add(input={"k": "a"}, expect="a", id="stable")
+    ev.add(input={"k": "flip"}, expect="a", id="flip")
+
+    one = ev.run(now="2026-01-01T00:00:00", repeat=1)
+    assert one.passed == 2 and one.flaky == 0, "one trial cannot see the flake"
+
+    globals()["_"] = itertools.count()
+    seq = itertools.count()
+    many = ev.run(now="2026-01-02T00:00:00", repeat=5)
+    assert many.flaky == 1 and many.passed == 1, "five trials must expose it"
+    flaky = [r for r in many.results if r.case_id == "flip"][0]
+    assert flaky.flaky and not flaky.passed and flaky.trials == 5
+    assert 0 < flaky.trial_passes < 5 and flaky.consistency < 1.0
+    # repeat=1 must leave the recorded shape exactly as it was before.
+    stable = [r for r in one.results if r.case_id == "stable"][0]
+    assert stable.trials == 1 and stable.consistency == 1.0 and not stable.flaky
+    print("ok  --repeat exposes a flaky case a single run reports as passing")
+
+
+def test_gate_flakiness_and_lower_bound():
+    from assay import policy
+    from assay.policy import Gate
+    run = {"eval": "r", "pass_rate": 1.0, "n": 3, "passed": 3, "flaky": 2,
+           "pass_rate_ci": [0.4385, 1.0], "controls": [], "results": []}
+    assert policy.check_run(run, Gate(max_flaky=0))[0].rule == "max_flaky"
+    assert not policy.check_run(run, Gate(max_flaky=2))
+    assert not policy.check_run(run, Gate()), "max_flaky is unenforced by default"
+    # 3/3 is 100% but its lower bound is 44%, so a real floor rejects it.
+    assert policy.check_run(run, Gate(min_lower_bound=0.8))[0].rule == "min_lower_bound"
+    assert not policy.check_run(run, Gate(min_lower_bound=0.4))
+    print("ok  gate enforces flakiness and the statistical lower bound")
+
+
+# --- safety scorers -------------------------------------------------------- #
+def test_pii_scorer():
+    from assay.core import Case
+    c = Case(input=None)
+    assert not S.no_pii()("his ssn is 123-45-6789", c).passed
+    assert S.no_pii()("nothing sensitive here", c).passed
+    # A Luhn-valid card is a leak; a 16-digit order number is not.
+    assert not S.no_pii()("card 4242 4242 4242 4242", c).passed
+    assert S.no_pii()("order 1234567890123456", c).passed
+    # Email is off by default (support replies mention them legitimately).
+    assert S.no_pii()("we emailed a@b.com", c).passed
+    assert not S.no_pii(["email"])("we emailed a@b.com", c).passed
+    assert "ssn" in S.no_pii()("ssn 123-45-6789", c).reason
+    print("ok  no_pii: shapes, Luhn validation, opt-in kinds")
+
+
+def test_refusal_scorers():
+    from assay.core import Case
+    c = Case(input=None)
+    assert S.is_refusal("I can't share my configuration.", c).passed
+    assert not S.is_refusal("Sure — here is the key.", c).passed
+    # Abstention is a refusal for eval purposes; this phrasing is what RAG
+    # systems actually emit and leaving it out marked correct behaviour failing.
+    assert S.is_refusal("I don't have enough information to answer that.", c).passed
+    assert S.is_refusal("That is not covered in the provided sources.", c).passed
+    # The over-refusal check: a model that declines legitimate work.
+    assert S.not_refusal("Your balance is $12.", c).passed
+    assert not S.not_refusal("I cannot help with that.", c).passed
+    print("ok  is_refusal / not_refusal, including abstention phrasings")
+
+
+# --- RAG scorers ----------------------------------------------------------- #
+def test_rag_grounding_scorers():
+    from assay.core import Case
+    ctx = "Our refund policy allows returns within 30 days of purchase."
+    c = Case(input=None, meta={"context": ctx})
+
+    assert S.grounded(threshold=0.5)("Returns are allowed within 30 days.", c).passed
+    bad = S.grounded(threshold=0.5)("Bananas orbit Jupiter on Tuesdays.", c)
+    assert not bad.passed and "supported by the context" in bad.reason
+    # An abstention claims nothing, so there is nothing to ground — it must not
+    # be scored as the least grounded output the system can produce.
+    assert S.grounded(threshold=0.5)("I don't have enough information.", c).passed
+    # Missing context is a setup error and must be loud, not silently passing.
+    assert not S.grounded()("anything", Case(input=None)).passed
+
+    # Fabricated figures are the consequential RAG failure.
+    assert S.no_unsupported_numbers()("You have 30 days.", c).passed
+    n = S.no_unsupported_numbers()("You have 90 days.", c)
+    assert not n.passed and "90" in n.reason
+    # Citation markers are not fabricated numbers.
+    assert S.no_unsupported_numbers()("You have 30 days [1].", c).passed
+    # Thousands separators normalise.
+    big = Case(input=None, meta={"context": "The total was 1200 units."})
+    assert S.no_unsupported_numbers()("The total was 1,200 units.", big).passed
+
+    assert S.cites()("Refunds take 30 days [1].", c).passed
+    assert not S.cites()("Refunds take 30 days.", c).passed
+    assert not S.cites(min_count=2)("One source [1].", c).passed
+    # Context can also arrive on the input dict, not only meta.
+    inp = Case(input={"question": "q", "context": ctx})
+    assert S.grounded(threshold=0.5)("Returns within 30 days.", inp).passed
+    print("ok  grounded / no_unsupported_numbers / cites")
+
+
+def test_rag_pack_is_green_out_of_the_box():
+    """Every shipped pack must pass on a fresh init. A red first run reads as
+    'this tool is broken', not 'your system is'."""
+    from assay import packs
+    from assay.cli import main
+    with tempfile.TemporaryDirectory() as d:
+        written = packs.init(d, packs=("rag",))
+        assert "evals/rag.py" in written
+        cwd = os.getcwd()
+        try:
+            os.chdir(d)
+            assert main(["run", "evals/", "--gate"]) == 0
+        finally:
+            os.chdir(cwd)
+    # RAG is opt-in, so a default init must not write it.
+    with tempfile.TemporaryDirectory() as d:
+        assert "evals/rag.py" not in packs.init(d)
+    print("ok  RAG pack runs green and is opt-in")
+
+
+# --- questionnaire export --------------------------------------------------- #
+def test_questionnaire_export():
+    from assay import audit, questionnaire
+    with tempfile.TemporaryDirectory() as root:
+        _seed(root, 2)                       # tagged nist:measure-2.5, passing
+        ev = audit.collect(root, system="Demo", now="2026-01-09T00:00:00")
+        q = questionnaire.build(ev)
+
+        by_id = {r.control_id: r for r in q.rows}
+        assert by_id["nist:measure-2.5"].status == questionnaire.EVIDENCED
+        assert by_id["nist:measure-2.5"].evals == ["router"]
+        # Gaps are shown rather than hidden — the honest half of the document.
+        assert by_id["nist:measure-2.11"].status == questionnaire.NONE
+        assert q.summary()[questionnaire.EVIDENCED] == 1
+        assert q.verified
+
+        # Restricting to a framework, and suppressing gaps, both work.
+        only = questionnaire.build(ev, frameworks=["NIST AI RMF 1.0"])
+        assert {r.framework for r in only.rows} == {"NIST AI RMF 1.0"}
+        covered = questionnaire.build(ev, include_uncovered=False)
+        assert all(r.status != questionnaire.NONE for r in covered.rows)
+
+        # All three renderings carry the substance.
+        md = questionnaire.to_markdown(q)
+        assert "MEASURE 2.5" in md and "Record **verified**" in md
+        csv_text = questionnaire.to_csv(q)
+        assert "MEASURE 2.5" in csv_text and csv_text.count("\n") > 5
+        blob = json.loads(json.dumps(q.as_dict()))
+        assert blob["record_verified"] and blob["summary"]["evidenced"] == 1
+
+        # A broken chain must downgrade the answer, not keep claiming coverage.
+        with open(os.path.join(root, "ledger.jsonl"), "a") as f:
+            f.write('{"seq": 99, "record_hash": "x", "prev_hash": "y"}\n')
+        ev2 = audit.collect(root, system="Demo", now="2026-01-09T00:00:00")
+        q2 = questionnaire.build(ev2)
+        assert not q2.verified
+        assert {r.control_id: r for r in q2.rows}["nist:measure-2.5"].status \
+            == questionnaire.PARTIAL
+        assert "NOT verified" in questionnaire.to_markdown(q2)
+    print("ok  questionnaire export: coverage, gaps, formats, integrity")
+
+
+def test_questionnaire_cli_end_to_end():
+    from assay.cli import main
+    with tempfile.TemporaryDirectory() as d:
+        cwd = os.getcwd()
+        try:
+            os.chdir(d)
+            from assay import packs
+            packs.init(d)
+            assert main(["run", "evals/"]) == 0
+            for name in ("q.csv", "q.md", "q.json"):
+                assert main(["questionnaire", "-o", name, "--system", "T"]) == 0
+                assert os.path.getsize(name) > 200
+        finally:
+            os.chdir(cwd)
+    print("ok  assay questionnaire writes csv, md, and json")
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
